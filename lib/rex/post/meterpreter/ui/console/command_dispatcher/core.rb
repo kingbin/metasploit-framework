@@ -83,6 +83,8 @@ class Console::CommandDispatcher::Core
       if client.passive_service && client.sock.type? == 'tcp-ssl'
         c['ssl_verify'] = 'Modify the SSL certificate verification setting'
       end
+
+      c['pivot'] = 'Manage pivot listeners'
     end
 
     if client.platform == 'windows' || client.platform == 'linux'
@@ -95,8 +97,9 @@ class Console::CommandDispatcher::Core
     # the OS platform rather than the meterpreter arch. When we've properly implemented
     # the platform update feature we can remove some of these conditions
     if client.platform == 'windows' || client.platform == 'linux' ||
-        client.platform == 'python' || client.platform == 'java' ||
-        client.arch == ARCH_PYTHON || client.platform == 'android'
+        client.platform == 'python' || client.arch == ARCH_PYTHON ||
+        client.platform == 'java' || client.arch == ARCH_JAVA ||
+        client.platform == 'android' || client.arch == ARCH_DALVIK
       # Yet to implement transport hopping for other meterpreters.
       c['transport'] = 'Change the current transport mechanism'
 
@@ -117,6 +120,177 @@ class Console::CommandDispatcher::Core
   #
   def name
     'Core'
+  end
+
+  @@pivot_opts = Rex::Parser::Arguments.new(
+    '-t' => [true, 'Pivot listener type'],
+    '-i' => [true, 'Identifier of the pivot to remove'],
+    '-l' => [true, 'Host address to bind to (if applicable)'],
+    '-n' => [true, 'Name of the listener entity (if applicable)'],
+    '-a' => [true, 'Architecture of the stage to generate'],
+    '-p' => [true, 'Platform of the stage to generate'],
+    '-h' => [false, 'View help']
+  )
+
+  @@pivot_supported_archs = [ARCH_X64, ARCH_X86]
+  @@pivot_supported_platforms = ['windows']
+
+  def cmd_pivot_help
+    print_line('Usage: pivot <list|add|remove> [options]')
+    print_line
+    print_line('Manage pivot listeners on the target.')
+    print_line
+    print_line(@@pivot_opts.usage)
+    print_line
+    print_line('Supported pivot types:')
+    print_line('     - pipe (using named pipes over SMB)')
+    print_line('Supported arhiectures:')
+    @@pivot_supported_archs.each do |a|
+      print_line('     - ' + a)
+    end
+    print_line('Supported platforms:')
+    print_line('     - windows')
+    print_line
+    print_line("eg.    pivot add -t pipe -l 192.168.0.1 -n msf-pipe -a #{@@pivot_supported_archs.first} -p windows")
+    print_line("       pivot list")
+    print_line("       pivot remove -i 1")
+    print_line
+  end
+
+  def cmd_pivot_tabs(str, words)
+    return %w[list add remove] + @@pivot_opts.fmt.keys if words.length == 1
+
+    case words[-1]
+    when '-a'
+      return @@pivot_supported_archs
+    when '-i'
+      matches = []
+      client.pivot_listeners.each_value { |v| matches << v.id.unpack('H*')[0] }
+      return matches
+    when '-p'
+      return @@pivot_supported_platforms
+    when '-t'
+      return ['pipe']
+    when 'add', 'remove'
+      return @@pivot_opts.fmt.keys
+    end
+
+    []
+  end
+
+  def cmd_pivot(*args)
+    if args.length == 0 || args.include?('-h')
+      cmd_pivot_help
+      return true
+    end
+
+    opts = {}
+    @@pivot_opts.parse(args) { |opt, idx, val|
+      case opt
+      when '-t'
+        opts[:type] = val
+      when '-i'
+        opts[:guid] = val
+      when '-l'
+        opts[:lhost] = val
+      when '-n'
+        opts[:name] = val
+      when '-a'
+        opts[:arch] = val
+      when '-p'
+        opts[:platform] = val
+      end
+    }
+
+    # first parameter is the command
+    case args[0]
+    when 'remove', 'del', 'delete', 'rm'
+      unless opts[:guid]
+        print_error('Pivot listener ID must be specified (-i)')
+        return false
+      end
+
+      unless opts[:guid] =~ /^[0-9a-f]{32}/i && opts[:guid].length == 32
+        print_error("Invalid pivot listener ID: #{opts[:guid]}")
+        return false
+      end
+
+      listener_id = [opts[:guid]].pack('H*')
+      unless client.find_pivot_listener(listener_id)
+        print_error("Unknown pivot listener ID: #{opts[:guid]}")
+        return false
+      end
+
+      Pivot.remove_listener(client, listener_id)
+      print_good("Successfully removed pivot: #{opts[:guid]}")
+    when 'list', 'show', 'print'
+      if client.pivot_listeners.length > 0
+        tbl = Rex::Text::Table.new(
+          'Header'  => 'Currently active pivot listeners',
+          'Indent'  => 4,
+          'Columns' => ['Id', 'URL', 'Stage'])
+
+        client.pivot_listeners.each do |k, v|
+          tbl << v.to_row
+        end
+        print_line
+        print_line(tbl.to_s)
+      else
+        print_status('There are no active pivot listeners')
+      end
+    when 'add'
+      unless opts[:type]
+        print_error('Pivot type must be specified (-t)')
+        return false
+      end
+
+      unless opts[:arch]
+        print_error('Architecture must be specified (-a)')
+        return false
+      end
+      unless @@pivot_supported_archs.include?(opts[:arch])
+        print_error("Unknown or unsupported architecture: #{opts[:arch]}")
+        return false
+      end
+
+      unless opts[:platform]
+        print_error('Platform must be specified (-p)')
+        return false
+      end
+      unless @@pivot_supported_platforms.include?(opts[:platform])
+        print_error("Unknown or unsupported platform: #{opts[:platform]}")
+        return false
+      end
+
+      # currently only one pivot type supported, more to come we hope
+      case opts[:type]
+      when 'pipe'
+        pivot_add_named_pipe(opts)
+      else
+        print_error("Unknown pivot type: #{opts[:type]}")
+        return false
+      end
+    else
+      print_error("Unknown command: #{args[0]}")
+    end
+  end
+
+  def pivot_add_named_pipe(opts)
+    unless opts[:lhost]
+      print_error('Pipe host must be specified (-l)')
+      return false
+    end
+
+    unless opts[:name]
+      print_error('Pipe name must be specified (-n)')
+      return false
+    end
+
+    # reconfigure the opts so that they can be passed to the setup function
+    opts[:pipe_host] = opts[:lhost]
+    opts[:pipe_name] = opts[:name]
+    Pivot.create_named_pipe_listener(client, opts)
+    print_good("Successfully created #{opts[:type]} pivot.")
   end
 
   def cmd_sessions_help
@@ -269,7 +443,7 @@ class Console::CommandDispatcher::Core
   # Closes a supplied channel.
   #
   def cmd_close(*args)
-    if args.length == 0
+    if args.empty? || args.include?('-h')
       cmd_close_help
       return true
     end
@@ -335,7 +509,7 @@ class Console::CommandDispatcher::Core
   # Interacts with a channel.
   #
   def cmd_interact(*args)
-    if args.length == 0
+    if args.empty? || args.include?('-h')
       cmd_info_help
       return true
     end
@@ -359,6 +533,11 @@ class Console::CommandDispatcher::Core
     print_line
     print_line('Execute commands in a Ruby environment')
     print @@irb_opts.usage
+  end
+
+  def cmd_irb_tabs(str, words)
+    return [] if words.length > 1
+    @@irb_opts.fmt.keys
   end
 
   #
@@ -404,6 +583,11 @@ class Console::CommandDispatcher::Core
     print_line('Set the current timeout options.')
     print_line('Any or all of these can be set at once.')
     print_line(@@set_timeouts_opts.usage)
+  end
+
+  def cmd_set_timeouts_tabs(str, words)
+    return [] if words.length > 1
+    @@set_timeouts_opts.fmt.keys
   end
 
   def cmd_set_timeouts(*args)
@@ -469,8 +653,9 @@ class Console::CommandDispatcher::Core
   # Get the session GUID
   #
   def cmd_guid(*args)
-    client.guid = client.core.get_session_guid unless client.guid
-    print_good("Session GUID: #{client.guid}")
+    parts = client.session_guid.unpack('H*')[0]
+    guid = [parts[0, 8], parts[8, 4], parts[12, 4], parts[16, 4], parts[20, 12]].join('-')
+    print_good("Session GUID: #{guid}")
   end
 
   #
@@ -578,7 +763,7 @@ class Console::CommandDispatcher::Core
   # Handle the sleep command.
   #
   def cmd_sleep(*args)
-    if args.length == 0
+    if args.empty? || args.include?('-h')
       cmd_sleep_help
       return
     end
@@ -636,6 +821,25 @@ class Console::CommandDispatcher::Core
     print_line('   prev: jump to the previous transport in the list (no options).')
     print_line(' remove: remove an existing, non-active transport.')
     print_line(@@transport_opts.usage)
+  end
+
+  def cmd_transport_tabs(str, words)
+    return %w[list change add next prev remove] + @@transport_opts.fmt.keys if words.length == 1
+
+    case words[-1]
+    when '-c'
+      return tab_complete_filenames(str, words)
+    when '-i'
+      return (1..client.core.transport_list[:transports].length).to_a.map!(&:to_s)
+    when '-l'
+      return tab_complete_source_address
+    when '-t'
+      return %w[reverse_tcp reverse_http reverse_https bind_tcp]
+    when 'add', 'remove', 'change'
+      return @@transport_opts.fmt.keys
+    end
+
+    []
   end
 
   def update_transport_map
@@ -905,6 +1109,12 @@ class Console::CommandDispatcher::Core
       end
     end
 
+    # we cannot migrate to another process until loaded stdapi
+    unless extensions.include?('stdapi')
+      print_error('Stdapi extension must be loaded.')
+      return
+    end
+
     unless pid
       unless (pid = args.first)
         print_error('A process ID or name argument must be provided')
@@ -954,6 +1164,11 @@ class Console::CommandDispatcher::Core
       end
     end
 
+    if pid == server.pid
+      print_error("Process already running at PID #{pid}")
+      return
+    end
+
     server ? print_status("Migrating from #{server.pid} to #{pid}...") : print_status("Migrating to #{pid}")
 
     # Do this thang.
@@ -993,14 +1208,27 @@ class Console::CommandDispatcher::Core
       case opt
       when '-l'
         exts = SortedSet.new
-        msf_path = MetasploitPayloads.msf_meterpreter_dir
-        gem_path = MetasploitPayloads.local_meterpreter_dir
-        [msf_path, gem_path].each do |path|
-          ::Dir.entries(path).each { |f|
-            if (::File.file?(::File.join(path, f)) && f =~ /ext_server_(.*)\.#{client.binary_suffix}/ )
-              exts.add($1)
-            end
-          }
+        if extensions.include?('stdapi') && !client.sys.config.sysinfo['BuildTuple'].blank?
+          # Use API to get list of extensions from the gem
+          exts.merge(MetasploitPayloads::Mettle.available_extensions(client.sys.config.sysinfo['BuildTuple']))
+        else
+          msf_path = MetasploitPayloads.msf_meterpreter_dir
+          gem_path = MetasploitPayloads.local_meterpreter_dir
+          [msf_path, gem_path].each do |path|
+            ::Dir.entries(path).each { |f|
+              if (::File.file?(::File.join(path, f)))
+                client.binary_suffix.each { |s|
+                  if (f =~ /ext_server_(.*)\.#{s}/ )
+                    if (client.binary_suffix.size > 1)
+                      exts.add($1 + ".#{s}")
+                    else
+                      exts.add($1)
+                    end
+                  end
+                }
+              end
+            }
+          end
         end
         print(exts.to_a.join("\n") + "\n")
 
@@ -1014,7 +1242,16 @@ class Console::CommandDispatcher::Core
     # Load each of the modules
     args.each { |m|
       md = m.downcase
+      modulenameprovided = md
 
+      if client.binary_suffix and client.binary_suffix.size > 1
+        client.binary_suffix.each { |s|
+          if (md =~ /(.*)\.#{s}/ )
+            md = $1
+            break
+          end
+        }
+      end
       if (extensions.include?(md))
         print_error("The '#{md}' extension has already been loaded.")
         next
@@ -1024,7 +1261,7 @@ class Console::CommandDispatcher::Core
 
       begin
         # Use the remote side, then load the client-side
-        if (client.core.use(md) == true)
+        if (client.core.use(modulenameprovided) == true)
           add_extension_client(md)
         end
       rescue
@@ -1041,16 +1278,31 @@ class Console::CommandDispatcher::Core
 
   def cmd_load_tabs(str, words)
     tabs = SortedSet.new
-    msf_path = MetasploitPayloads.msf_meterpreter_dir
-    gem_path = MetasploitPayloads.local_meterpreter_dir
-    [msf_path, gem_path].each do |path|
-    ::Dir.entries(path).each { |f|
-      if (::File.file?(::File.join(path, f)) && f =~ /ext_server_(.*)\.#{client.binary_suffix}/ )
-        if (not extensions.include?($1))
-          tabs.add($1)
+    if extensions.include?('stdapi') && !client.sys.config.sysinfo['BuildTuple'].blank?
+      # Use API to get list of extensions from the gem
+      MetasploitPayloads::Mettle.available_extensions(client.sys.config.sysinfo['BuildTuple']).each { |f|
+        if !extensions.include?(f.split('.').first)
+          tabs.add(f)
         end
+      }
+    else
+      msf_path = MetasploitPayloads.msf_meterpreter_dir
+      gem_path = MetasploitPayloads.local_meterpreter_dir
+      [msf_path, gem_path].each do |path|
+      ::Dir.entries(path).each { |f|
+        if (::File.file?(::File.join(path, f)))
+          client.binary_suffix.each { |s|
+            if (f =~ /ext_server_(.*)\.#{s}/ )
+              if (client.binary_suffix.size > 1 && !extensions.include?($1 + ".#{s}"))
+                tabs.add($1 + ".#{s}")
+              elsif (!extensions.include?($1))
+                tabs.add($1)
+              end
+            end
+          }
+        end
+      }
       end
-    }
     end
     return tabs.to_a
   end
@@ -1073,7 +1325,7 @@ class Console::CommandDispatcher::Core
   # Reads data from a channel.
   #
   def cmd_read(*args)
-    if args.length == 0
+    if args.empty? || args.include?('-h')
       cmd_read_help
       return true
     end
@@ -1113,7 +1365,7 @@ class Console::CommandDispatcher::Core
   # Executes a script in the context of the meterpreter session.
   #
   def cmd_run(*args)
-    if args.length == 0
+    if args.empty? || args.include?('-h')
       cmd_run_help
       return true
     end
@@ -1183,11 +1435,12 @@ class Console::CommandDispatcher::Core
   # Executes a script in the context of the meterpreter session in the background
   #
   def cmd_bgrun(*args)
-    if args.length == 0
-        print_line('Usage: bgrun <script> [arguments]')
-        print_line
-        print_line('Executes a ruby script in the context of the meterpreter session.')
-        print_line
+    if args.empty? || args.include?('-h')
+      print_line('Usage: bgrun <script> [arguments]')
+      print_line
+      print_line('Executes a ruby script in the context of the meterpreter session.')
+      print_line
+
       return true
     end
 
@@ -1223,7 +1476,7 @@ class Console::CommandDispatcher::Core
   # Kill a background job
   #
   def cmd_bgkill(*args)
-    if args.length == 0
+    if args.empty? || args.include?('-h')
       print_line('Usage: bgkill [id]')
       return
     end
@@ -1304,6 +1557,11 @@ class Console::CommandDispatcher::Core
     print_line(@@write_opts.usage)
   end
 
+  def cmd_write_tabs(str, words)
+    return tab_complete_filenames(str, words) if words[-1] == '-f'
+    tab_complete_channels
+  end
+
   def cmd_write(*args)
     if args.length == 0 || args.include?("-h")
       cmd_write_help
@@ -1376,49 +1634,73 @@ class Console::CommandDispatcher::Core
   end
 
   def cmd_resource_help
-    print_line('Usage: resource <path1> [path2 ...]')
+    print_line "Usage: resource path1 [path2 ...]"
     print_line
-    print_line('Run the commands stored in the supplied files.')
+    print_line "Run the commands stored in the supplied files. (- for stdin, press CTRL+D to end input from stdin)"
+    print_line "Resource files may also contain ERB or Ruby code between <ruby></ruby> tags."
     print_line
   end
 
   def cmd_resource(*args)
     if args.empty?
+      cmd_resource_help
       return false
     end
 
-    args.each do |glob|
-      files = ::Dir.glob(::File.expand_path(glob))
-      if files.empty?
-        print_error("No such file #{glob}")
-        next
-      end
-      files.each do |filename|
-        print_status("Reading #{filename}")
-        if (not ::File.readable?(filename))
-          print_error("Could not read file #{filename}")
-          next
-        else
-          ::File.open(filename, 'r').each_line do |line|
-            next if line.strip.length < 1
-            next if line[0,1] == '#'
-            begin
-              print_status("Running #{line}")
-              client.console.run_single(line)
-            rescue ::Exception => e
-              print_error("Error Running Command #{line}: #{e.class} #{e}")
-            end
-
+    args.each do |res|
+      good_res = nil
+      if res == '-'
+        good_res = res
+      elsif ::File.exist?(res)
+        good_res = res
+      elsif
+        # let's check to see if it's in the scripts/resource dir (like when tab completed)
+        [
+          ::Msf::Config.script_directory + ::File::SEPARATOR + 'resource' + ::File::SEPARATOR + 'meterpreter',
+          ::Msf::Config.user_script_directory + ::File::SEPARATOR + 'resource' + ::File::SEPARATOR + 'meterpreter'
+        ].each do |dir|
+          res_path = dir + ::File::SEPARATOR + res
+          if ::File.exist?(res_path)
+            good_res = res_path
+            break
           end
         end
+      end
+      if good_res
+        client.console.load_resource(good_res)
+      else
+        print_error("#{res} is not a valid resource file")
+        next
       end
     end
   end
 
   def cmd_resource_tabs(str, words)
-    return [] if words.length > 1
-
-    tab_complete_filenames(str, words)
+    tabs = []
+    #return tabs if words.length > 1
+    if ( str and str =~ /^#{Regexp.escape(::File::SEPARATOR)}/ )
+      # then you are probably specifying a full path so let's just use normal file completion
+      return tab_complete_filenames(str,words)
+    elsif (not words[1] or not words[1].match(/^\//))
+      # then let's start tab completion in the scripts/resource directories
+      begin
+        [
+          ::Msf::Config.script_directory + ::File::SEPARATOR + 'resource' + ::File::SEPARATOR + 'meterpreter',
+          ::Msf::Config.user_script_directory + ::File::SEPARATOR + 'resource' + ::File::SEPARATOR + 'meterpreter',
+          '.'
+        ].each do |dir|
+          next if not ::File.exist? dir
+          tabs += ::Dir.new(dir).find_all { |e|
+            path = dir + ::File::SEPARATOR + e
+            ::File.file?(path) and ::File.readable?(path)
+          }
+        end
+      rescue Exception
+      end
+    else
+      tabs += tab_complete_filenames(str,words)
+    end
+    return tabs
   end
 
   def cmd_enable_unicode_encoding

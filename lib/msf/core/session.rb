@@ -327,7 +327,14 @@ module Session
   # Get an arch/platform combination
   #
   def session_type
-    "#{self.arch}/#{self.platform}"
+    # avoid unnecessary slash separator
+    if !self.arch.nil? && !self.arch.empty? && !self.platform.nil? && !self.platform.empty?
+      separator =  '/'
+    else
+      separator = ''
+    end
+
+    "#{self.arch}#{separator}#{self.platform}"
   end
 
 
@@ -385,10 +392,6 @@ module Session
   # The unique machine identifier for the host that created this session
   #
   attr_accessor :machine_id
-  #
-  # The guid that identifies an active Meterpreter session
-  #
-  attr_accessor :guid
   #
   # The actual exploit module instance that created this session
   #

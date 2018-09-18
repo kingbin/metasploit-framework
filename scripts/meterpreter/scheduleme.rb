@@ -1,6 +1,6 @@
 ##
 # WARNING: Metasploit no longer maintains or accepts meterpreter scripts.
-# If you'd like to imporve this script, please try to port it as a post
+# If you'd like to improve this script, please try to port it as a post
 # module instead. Thank you.
 ##
 
@@ -241,7 +241,7 @@ password = nil
   end
 
 }
-if client.platform != 'windows'
+if client.platform == 'windows'
   if helpcall == 1
     usage()
   elsif cmd == nil && file == nil

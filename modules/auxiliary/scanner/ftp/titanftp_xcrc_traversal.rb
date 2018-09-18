@@ -16,7 +16,7 @@ class MetasploitModule < Msf::Auxiliary
     super(
       'Name'           => 'Titan FTP XCRC Directory Traversal Information Disclosure',
       'Description'    => %q{
-          This module exploits a directory traversal vulnreability in the XCRC command
+          This module exploits a directory traversal vulnerability in the XCRC command
         implemented in versions of Titan FTP up to and including 8.10.1125. By making
         sending multiple XCRC command, it is possible to disclose the contents of any
         file on the drive with a simple CRC "brute force" attack.
@@ -32,8 +32,9 @@ class MetasploitModule < Msf::Auxiliary
       'License'        => MSF_LICENSE,
       'References'     =>
         [
+          [ 'CVE', '2010-2426' ],
           [ 'OSVDB', '65533'],
-          [ 'URL', 'http://seclists.org/bugtraq/2010/Jun/160' ]
+          [ 'URL', 'https://seclists.org/bugtraq/2010/Jun/160' ]
         ],
       'DisclosureDate' => 'Jun 15 2010'
     )

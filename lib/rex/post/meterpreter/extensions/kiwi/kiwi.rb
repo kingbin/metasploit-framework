@@ -80,7 +80,6 @@ class Kiwi < Extension
       elsif output =~ /^ERROR.*SamLookupNamesInDomain/m
         result[:error] = 'Invalid user.'
       else
-        STDERR.puts(output)
         result[:error] = 'Unknown error.'
       end
     else
@@ -389,6 +388,9 @@ class Kiwi < Extension
       opts[:domain_name],
       " /sid:",
       opts[:domain_sid],
+      " /startoffset:0",
+      " /endin:",
+      opts[:end_in] * 60,
       " /krbtgt:",
       opts[:krbtgt_hash],
       "\""
@@ -511,4 +513,3 @@ class Kiwi < Extension
 end
 
 end; end; end; end; end
-
